@@ -17,9 +17,7 @@ Collation utilities for building VLM training batches from conversation examples
 """
 
 import json
-import os
 import warnings
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -43,9 +41,6 @@ try:
     HAVE_QWEN_VL_UTILS = True
 except ImportError:
     HAVE_QWEN_VL_UTILS = False
-
-
-_DEBUG_DUMP_COUNTER = 0
 
 
 def _render_tool_call_segment(tool_call: dict) -> str:
@@ -96,83 +91,6 @@ def _gather_assistant_text_segments(example: dict) -> list[str]:
             if rendered_tool_call:
                 texts.append(rendered_tool_call)
     return texts
-
-
-def _should_dump_debug_batch() -> bool:
-    debug_dir = os.environ.get("SFT_DEBUG_DUMP_DIR")
-    if not debug_dir:
-        return False
-
-    rank = os.environ.get("RANK", "0")
-    allowed_ranks = os.environ.get("SFT_DEBUG_DUMP_RANKS", "0").strip().lower()
-    if allowed_ranks not in {"*", "all"}:
-        allowed = {item.strip() for item in allowed_ranks.split(",") if item.strip()}
-        if rank not in allowed:
-            return False
-
-    max_steps = int(os.environ.get("SFT_DEBUG_DUMP_MAX_STEPS", "200"))
-    return max_steps < 0 or _DEBUG_DUMP_COUNTER < max_steps
-
-
-def _dump_debug_batch(examples: list, rendered_texts: list[str], batch: dict, processor) -> None:
-    """Write collator debug artifacts for verifying prompt rendering and loss masking."""
-    global _DEBUG_DUMP_COUNTER
-    if not _should_dump_debug_batch():
-        return
-
-    tokenizer = getattr(processor, "tokenizer", processor)
-    dump_dir = Path(os.environ["SFT_DEBUG_DUMP_DIR"])
-    dump_dir.mkdir(parents=True, exist_ok=True)
-
-    input_ids = batch["input_ids"].detach().cpu()
-    labels = batch["labels"].detach().cpu()
-    loss_mask = batch["loss_mask"].detach().cpu()
-    attention_mask = batch.get("attention_mask")
-    if isinstance(attention_mask, torch.Tensor) and attention_mask.dim() == 2:
-        attention_mask = attention_mask.detach().cpu()
-    else:
-        attention_mask = None
-
-    rows = []
-    for idx, example in enumerate(examples):
-        label_ids = [int(token_id) for token_id, keep in zip(labels[idx].tolist(), loss_mask[idx].tolist()) if keep and token_id >= 0]
-        supervised_target_text = tokenizer.decode(label_ids, skip_special_tokens=False)
-        rows.append(
-            {
-                "metadata": example.get("metadata"),
-                "rendered_text": rendered_texts[idx],
-                "assistant_loss_spans": _gather_assistant_text_segments(example),
-                "loss_token_count": int(loss_mask[idx].sum().item()),
-                "real_token_count": int(attention_mask[idx].sum().item()) if attention_mask is not None else None,
-                "supervised_target_text": supervised_target_text,
-                "decoded_loss_labels": supervised_target_text,
-                "debug_note": (
-                    "SFT does not generate a new model response here; supervised_target_text is the ground-truth "
-                    "assistant text/tool-call tokens receiving loss."
-                ),
-                "input_ids": input_ids[idx].tolist(),
-                "loss_mask": loss_mask[idx].tolist(),
-                "labels": labels[idx].tolist(),
-            }
-        )
-
-    rank = os.environ.get("RANK", "0")
-    local_rank = os.environ.get("LOCAL_RANK", "0")
-    filename = f"rank{rank}_local{local_rank}_pid{os.getpid()}_batch{_DEBUG_DUMP_COUNTER:06d}.json"
-    with (dump_dir / filename).open("w") as f:
-        json.dump(
-            {
-                "rank": rank,
-                "local_rank": local_rank,
-                "pid": os.getpid(),
-                "batch_index": _DEBUG_DUMP_COUNTER,
-                "examples": rows,
-            },
-            f,
-            indent=2,
-            ensure_ascii=False,
-        )
-    _DEBUG_DUMP_COUNTER += 1
 
 
 def create_multiturn_loss_mask_by_search(
@@ -381,7 +299,6 @@ def qwen2_5_collate_fn(examples: list, processor) -> dict[str, torch.Tensor]:
     # Enforce label masking to match shifted loss_mask
     batch["labels"] = batch["labels"].masked_fill(loss_mask_t == 0, -100)
     batch["loss_mask"] = loss_mask_t
-    _dump_debug_batch(examples, texts, batch, processor)
     # Build Qwen2VL visual inputs object and attach to batch; remove raw keys
     visual_inputs = Qwen2_5_VLVisualInputs(
         pixel_values=batch.get("pixel_values"),
