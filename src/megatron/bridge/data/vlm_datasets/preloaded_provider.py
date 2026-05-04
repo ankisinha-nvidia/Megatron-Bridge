@@ -127,7 +127,7 @@ def _record_to_conversation(record: Dict[str, Any], image_folder: Optional[str])
             role = "user" if from_role.lower() in ("human", "user") else "assistant"
             content_str = msg.get("value", "")
         else:
-            content_str = msg.get("content", "")
+            content_str = msg.get("content") or ""
 
         content_list = _split_text_by_placeholders(content_str, images, videos)
         if content_list:
@@ -140,7 +140,11 @@ def _record_to_conversation(record: Dict[str, Any], image_folder: Optional[str])
             content_list = media_parts
         if not content_list:
             content_list = [{"type": "text", "text": content_str}]
-        conversation.append({"role": role, "content": content_list})
+        converted_msg: Dict[str, Any] = {"role": role, "content": content_list}
+        for key in ("tool_calls", "reasoning_content"):
+            if key in msg:
+                converted_msg[key] = msg[key]
+        conversation.append(converted_msg)
     return conversation
 
 
@@ -216,7 +220,12 @@ class PreloadedVLMConversationProvider(DatasetProvider):
             conv = _record_to_conversation(rec, self.image_folder)
             if conv is None:
                 continue
-            base_examples.append({"conversation": conv})
+            example: Dict[str, Any] = {"conversation": conv}
+            if "tools" in rec:
+                example["tools"] = rec["tools"]
+            if "metadata" in rec:
+                example["metadata"] = rec["metadata"]
+            base_examples.append(example)
         if not base_examples:
             logging.warning(f"No usable examples parsed from {split_path}")
             return None
