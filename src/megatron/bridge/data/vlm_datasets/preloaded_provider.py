@@ -21,6 +21,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from transformers import AutoProcessor
@@ -144,6 +145,18 @@ def _record_to_conversation(record: Dict[str, Any], image_folder: Optional[str])
     return conversation
 
 
+def _set_processor_chat_template(processor: Any, chat_template_path: Optional[str]) -> None:
+    if not chat_template_path:
+        return
+    template = Path(chat_template_path).read_text()
+
+    if hasattr(processor, "chat_template"):
+        processor.chat_template = template
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None and hasattr(tokenizer, "chat_template"):
+        tokenizer.chat_template = template
+
+
 def _load_preloaded_examples(path: str) -> List[Dict[str, Any]]:
     examples: List[Dict[str, Any]] = []
     if path.endswith(".jsonl"):
@@ -202,6 +215,9 @@ class PreloadedVLMConversationProvider(DatasetProvider):
     # Enable batch-level online sequence packing
     pack_sequences_in_batch: bool = False
 
+    # Optional HF chat template override.
+    chat_template_path: Optional[str] = None
+
     def _build_split_dataset(
         self,
         split_path: Optional[str],
@@ -234,6 +250,7 @@ class PreloadedVLMConversationProvider(DatasetProvider):
                 hf_path=self.hf_processor_path,
             ),
         )
+        _set_processor_chat_template(processor, self.chat_template_path)
         train_ds = self._build_split_dataset(self.train_data_path, context.train_samples, processor)
         valid_ds = self._build_split_dataset(self.valid_data_path, context.valid_samples, processor)
         test_ds = self._build_split_dataset(self.test_data_path, context.test_samples, processor)
